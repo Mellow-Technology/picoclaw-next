@@ -183,7 +183,8 @@ func TestLoadConfig_SubstitutesEnvRefsAndSavesTemplates(t *testing.T) {
 	assert.Equal(t, "https://llm.internal/v1", m.APIBase)
 	assert.Equal(t, "sk-from-env", m.APIKey())
 	fs := cfg.Tools.MCP.Servers["fs"]
-	assert.Equal(t, []string{"${HOME}", "${PC_TEST_UNSET}"}, fs.Args, "escape gives a literal; unset is left as written")
+	assert.Equal(t, []string{"${HOME}", "${PC_TEST_UNSET}"}, fs.Args,
+		"escape gives a literal; unset is left as written")
 	assert.Equal(t, "mcp-secret", fs.Env["TOKEN"])
 
 	require.NoError(t, SaveConfig(configPath, cfg))
@@ -266,10 +267,10 @@ func TestLoadConfig_ChannelEnvByTypeAndName(t *testing.T) {
 
 	t.Run("name-level enabled overrides type-level", func(t *testing.T) {
 		t.Setenv("PICOCLAW_CHANNEL_SUPPORT_BOT_ENABLED", "false")
-		cfg, err := LoadConfig(configPath)
+		reloaded, err := LoadConfig(configPath)
 		require.NoError(t, err)
-		assert.True(t, cfg.Channels.Get("telegram").Enabled)
-		assert.False(t, cfg.Channels.Get("support-bot").Enabled)
+		assert.True(t, reloaded.Channels.Get("telegram").Enabled)
+		assert.False(t, reloaded.Channels.Get("support-bot").Enabled)
 	})
 
 	require.NoError(t, SaveConfig(configPath, cfg))

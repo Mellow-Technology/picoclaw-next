@@ -100,18 +100,25 @@ func captureOverlayLeaves(cfg *Config) (overlaySnapshot, error) {
 	snap.json = map[string]leafEntry{}
 	flattenJSON(tree, nil, snap.json)
 
-	if yerr != nil {
-		return snap, nil
-	}
-	var doc yaml.Node
-	if err := yaml.Unmarshal(ydata, &doc); err != nil {
-		return snap, nil
-	}
-	snap.yaml = map[string]leafEntry{}
-	if len(doc.Content) > 0 {
-		flattenYAML(doc.Content[0], nil, snap.yaml)
+	// Secrets that cannot be serialized leave snap.yaml nil: the YAML side of
+	// the overlay is skipped, and SaveConfig would fail the same way.
+	if yerr == nil {
+		snap.yaml = yamlLeaves(ydata)
 	}
 	return snap, nil
+}
+
+// yamlLeaves flattens a YAML document; it returns nil if data does not parse.
+func yamlLeaves(data []byte) map[string]leafEntry {
+	var doc yaml.Node
+	if yaml.Unmarshal(data, &doc) != nil {
+		return nil
+	}
+	leaves := map[string]leafEntry{}
+	if len(doc.Content) > 0 {
+		flattenYAML(doc.Content[0], nil, leaves)
+	}
+	return leaves
 }
 
 func pathKey(path []string) string { return strings.Join(path, "\x00") }
