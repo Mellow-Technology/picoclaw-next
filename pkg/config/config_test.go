@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1970,13 +1971,35 @@ func TestLoadConfig_UnknownFieldsReportsExactPaths(t *testing.T) {
 		t.Fatalf("WriteFile() error: %v", err)
 	}
 
-	_, err := LoadConfig(configPath)
-	if err == nil {
-		t.Fatal("expected unknown field error, got nil")
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("unknown fields should only warn, got error: %v", err)
 	}
-	if !strings.Contains(err.Error(), "tools.weeb") ||
-		!strings.Contains(err.Error(), "tools.web.fatch_limit_bytes") {
-		t.Fatalf("expected exact unknown field paths, got %q", err.Error())
+	if cfg == nil {
+		t.Fatal("LoadConfig() returned nil config")
+	}
+
+	got := unknownJSONFields([]byte(raw), &Config{})
+	want := []string{"tools.web.fatch_limit_bytes", "tools.weeb"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unknownJSONFields() = %v, want %v", got, want)
+	}
+}
+
+func TestLoadConfig_UnknownFieldsKeepKnownValues(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.json")
+	raw := `{"version": 2, "future_feature": {"on": true}, "gateway": {"port": 19999, "nope": 1}}`
+	if err := os.WriteFile(configPath, []byte(raw), 0o600); err != nil {
+		t.Fatalf("WriteFile() error: %v", err)
+	}
+
+	cfg, err := LoadConfig(configPath)
+	if err != nil {
+		t.Fatalf("LoadConfig() error: %v", err)
+	}
+	if cfg.Gateway.Port != 19999 {
+		t.Fatalf("Gateway.Port = %d, want 19999", cfg.Gateway.Port)
 	}
 }
 

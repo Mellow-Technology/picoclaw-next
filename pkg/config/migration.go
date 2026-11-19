@@ -96,6 +96,15 @@ func loadConfig(data []byte) (*Config, error) {
 	if err := decodeJSONWithDiagnostics(data, &tmp, "config.json"); err != nil {
 		return nil, err
 	}
+	// Unknown fields are ignored rather than rejected, so a config written by a
+	// newer version (or carrying a typo) still loads. Warn so typos are visible.
+	if unknown := unknownJSONFields(data, &tmp); len(unknown) > 0 {
+		logger.WarnCF(
+			"config",
+			"Ignoring unknown config.json field(s)",
+			map[string]any{"fields": unknown},
+		)
+	}
 	if len(tmp.ModelList) > 0 {
 		cfg.ModelList = nil
 	}
