@@ -37,6 +37,72 @@ PICOCLAW_HOME=/opt/picoclaw picoclaw agent
 PICOCLAW_HOME=/srv/picoclaw PICOCLAW_CONFIG=/srv/picoclaw/main.json picoclaw gateway
 ```
 
+### Configuring From the Environment
+
+Besides the paths above, settings can come from the environment. This lets one image run many gateways (for example one container per tenant) with a `config.json` that holds no secrets.
+
+Values are resolved in this order. Later steps win:
+
+1. **Config files:** `config.json`, then `.security.yml` for secrets.
+2. **`${VAR}` references** in string values of either file.
+3. **`PICOCLAW_*` environment overrides.**
+
+#### `${VAR}` references
+
+Any string value in `config.json` or `.security.yml` can reference environment variables:
+
+| Syntax | Result |
+|---|---|
+| `${VAR}` | The value of `VAR` |
+| `${VAR:-default}` | The value of `VAR`, or `default` when `VAR` is unset or empty |
+| `$${` | A literal `${` |
+
+A reference to an unset variable with no default is left as written, and a warning is logged. Shell-style `${...}` in existing values, such as hook commands or MCP arguments, therefore keeps working when the variable isn't set.
+
+Model API keys and MCP servers have no dedicated environment variables, so use references for them:
+
+```json
+{
+  "model_list": [
+    {
+      "model_name": "main",
+      "provider": "openai",
+      "model": "${MODEL:-gpt-5.4}",
+      "api_base": "https://${LLM_HOST}/v1",
+      "api_keys": ["${OPENAI_API_KEY}"]
+    }
+  ],
+  "tools": {
+    "mcp": {
+      "servers": {
+        "github": { "command": "github-mcp", "env": { "GITHUB_TOKEN": "${GITHUB_TOKEN}" } }
+      }
+    }
+  }
+}
+```
+
+Secrets written as references are saved as references: `.security.yml` keeps `${OPENAI_API_KEY}`, never the key itself. References work next to the existing `file://` and `enc://` forms; see the [Security Configuration Guide](../security/security_configuration.md).
+
+#### `PICOCLAW_*` overrides
+
+Most settings have an environment variable named after their path, for example `PICOCLAW_AGENTS_DEFAULTS_MAX_TOKENS`, `PICOCLAW_GATEWAY_HOST` or `PICOCLAW_TOOLS_EXEC_ENABLED`. The `env` tags in `pkg/config/config.go` list them.
+
+Channels can be overridden by type or by name. These only apply to channels that exist in `channel_list`:
+
+| Variable | Applies to |
+|---|---|
+| `PICOCLAW_CHANNELS_<TYPE>_<FIELD>` (e.g. `PICOCLAW_CHANNELS_TELEGRAM_TOKEN`) | Every channel of that type |
+| `PICOCLAW_CHANNELS_<TYPE>_ENABLED` | Turns every channel of that type on or off |
+| `PICOCLAW_CHANNEL_<NAME>_<FIELD>` (e.g. `PICOCLAW_CHANNEL_SUPPORT_BOT_TOKEN`) | Only the channel named `<NAME>`; wins over the type variable |
+| `PICOCLAW_CHANNEL_<NAME>_ENABLED` | Turns only that channel on or off |
+
+`<TYPE>` and `<NAME>` are upper-cased, with characters other than letters and digits replaced by `_`. A channel named `support-bot` uses `PICOCLAW_CHANNEL_SUPPORT_BOT_*`. `<FIELD>` is the same suffix as in the type variable, so `PICOCLAW_CHANNEL_SUPPORT_BOT_TOKEN` sets what `PICOCLAW_CHANNELS_TELEGRAM_TOKEN` would, but for that one channel. Two telegram bots in one gateway can each get their own token this way.
+
+#### Environment values are never saved
+
+Values from `${VAR}` references and `PICOCLAW_*` overrides only exist at runtime. Saving the config writes the file values back, never what the environment provided. This applies to the CLI (`picoclaw model`, `picoclaw mcp add`, `picoclaw auth …`), the web console, and the automatic migration of older config files. If you change an overridden setting on purpose, for example in the web console, your new value is saved.
+
 ### Gateway Log Level
 
 `gateway.log_level` controls Gateway log verbosity and is configurable in `config.json`.

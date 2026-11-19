@@ -406,12 +406,16 @@ The system maintains full backward compatibility:
 
 ## Environment Variables
 
-You can override any security value using environment variables:
+You can provide security values from the environment.
 
-**For models:**
-```bash
-export PICOCLAW_CHANNELS_TELEGRAM_TOKEN="token-from-env"
+**For models:** model keys have no dedicated variable. Reference one from `.security.yml` (or `config.json`) instead:
+```yaml
+model_list:
+  gpt-5.4:
+    api_keys:
+      - "${OPENAI_API_KEY}"
 ```
+The reference is kept when the config is saved, so the key itself never lands in `.security.yml`. See [Configuring From the Environment](../guides/configuration.md#configuring-from-the-environment).
 
 **For channels:**
 ```bash
@@ -425,7 +429,7 @@ export PICOCLAW_TOOLS_WEB_BRAVE_API_KEY="key-from-env"
 export PICOCLAW_TOOLS_WEB_BAIDU_API_KEY="baidu-key-from-env"
 ```
 
-Environment variables have the highest priority and will override both `config.json` and `.security.yml` values.
+Environment variables have the highest priority and will override both `config.json` and `.security.yml` values. They are runtime-only: saving the config never writes them to either file.
 
 The pattern is: `PICOCLAW_<SECTION>_<KEY>_<FIELD>` with underscores separating path segments and converted to uppercase.
 

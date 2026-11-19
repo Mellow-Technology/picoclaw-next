@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1455,5 +1456,64 @@ func TestApplyConfigSecretsFromMap_ChannelNotDecodedYet(t *testing.T) {
 	tgCfg := decoded.(*config.TelegramSettings)
 	if got := tgCfg.Token.String(); got != "lazy-decoded-token" {
 		t.Fatalf("telegram token = %q, want %q", got, "lazy-decoded-token")
+	}
+}
+
+// PATCH and PUT edit the effective config; env overrides must not be saved.
+func TestHandleConfigWrites_DoNotPersistEnvOverrides(t *testing.T) {
+	for _, method := range []string{http.MethodPatch, http.MethodPut} {
+		t.Run(method, func(t *testing.T) {
+			configPath, cleanup := setupOAuthTestEnv(t)
+			defer cleanup()
+			t.Setenv("PICOCLAW_AGENTS_DEFAULTS_MAX_TOOL_ITERATIONS", "7")
+
+			h := NewHandler(configPath)
+			mux := http.NewServeMux()
+			h.RegisterRoutes(mux)
+
+			body := `{"agents": {"defaults": {"max_tokens": 1234}}}`
+			if method == http.MethodPut {
+				// PUT sends the whole config, as the web UI does after a GET.
+				get := httptest.NewRecorder()
+				mux.ServeHTTP(get, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+				var full map[string]any
+				if err := json.Unmarshal(get.Body.Bytes(), &full); err != nil {
+					t.Fatalf("decode GET /api/config: %v", err)
+				}
+				full["agents"].(map[string]any)["defaults"].(map[string]any)["max_tokens"] = 1234
+				raw, _ := json.Marshal(full)
+				body = string(raw)
+			}
+
+			req := httptest.NewRequest(method, "/api/config", bytes.NewBufferString(body))
+			req.Header.Set("Content-Type", "application/json")
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want %d, body=%s", rec.Code, http.StatusOK, rec.Body.String())
+			}
+
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var saved struct {
+				Agents struct {
+					Defaults struct {
+						MaxTokens         int `json:"max_tokens"`
+						MaxToolIterations int `json:"max_tool_iterations"`
+					} `json:"defaults"`
+				} `json:"agents"`
+			}
+			if err := json.Unmarshal(data, &saved); err != nil {
+				t.Fatal(err)
+			}
+			if saved.Agents.Defaults.MaxTokens != 1234 {
+				t.Errorf("max_tokens = %d, want the edited 1234", saved.Agents.Defaults.MaxTokens)
+			}
+			if saved.Agents.Defaults.MaxToolIterations == 7 {
+				t.Errorf("max_tool_iterations = 7: env override was written to config.json")
+			}
+		})
 	}
 }

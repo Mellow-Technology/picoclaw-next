@@ -56,6 +56,21 @@ type Config struct {
 
 	// cache for sensitive values and compiled regex (computed once)
 	sensitiveCache *SensitiveDataCache
+
+	// overlay records what env overrides and ${VAR} substitution changed at
+	// load time, so SaveConfig can write the file values back instead.
+	overlay *configOverlay
+}
+
+// CarryRuntimeOverrides makes SaveConfig(c) treat values that env overrides
+// or ${VAR} substitution produced when src was loaded as runtime-only, so they
+// are not written to disk. Use it when c was rebuilt from src's effective
+// values, e.g. by a JSON round trip through an editing API.
+func (c *Config) CarryRuntimeOverrides(src *Config) {
+	if c == nil || src == nil {
+		return
+	}
+	c.overlay = src.overlay
 }
 
 type EvolutionConfig struct {
@@ -2023,25 +2038,8 @@ func LoadConfig(path string) (*Config, error) {
 
 	applyLegacyBindingsMigration(data, cfg)
 
-	gatewayHostBeforeEnv := cfg.Gateway.Host
-
-	if err = env.Parse(cfg); err != nil {
+	if err = initChannelListFromFiles(cfg.Channels); err != nil {
 		return nil, err
-	}
-	applySkillsRegistryEnvCompat(cfg)
-
-	if err = InitChannelList(cfg.Channels); err != nil {
-		return nil, err
-	}
-	if err = cfg.ValidateTurnProfile(); err != nil {
-		return nil, err
-	}
-	if err = cfg.ValidateBudgetWarningRatio(); err != nil {
-		return nil, err
-	}
-	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
-	if err != nil {
-		return nil, fmt.Errorf("invalid gateway host: %w", err)
 	}
 
 	// Reject null entries before expansion: expandMultiKeyModels dereferences
@@ -2050,6 +2048,17 @@ func LoadConfig(path string) (*Config, error) {
 		if model == nil {
 			return nil, fmt.Errorf("model_list[%d]: model entry is null", i)
 		}
+	}
+
+	if err = applyRuntimeOverrides(cfg); err != nil {
+		return nil, err
+	}
+
+	if err = cfg.ValidateTurnProfile(); err != nil {
+		return nil, err
+	}
+	if err = cfg.ValidateBudgetWarningRatio(); err != nil {
+		return nil, err
 	}
 
 	// Expand multi-key configs into separate entries for key-level failover
@@ -2070,6 +2079,42 @@ func LoadConfig(path string) (*Config, error) {
 	cfg.Session.DeriveDmScope()
 
 	return cfg, nil
+}
+
+// applyRuntimeOverrides applies ${VAR} substitution and environment variable
+// overrides to cfg, which holds the values from the config files. It records
+// what changed so SaveConfig never writes these runtime values to disk.
+func applyRuntimeOverrides(cfg *Config) error {
+	base, err := captureOverlayLeaves(cfg)
+	if err != nil {
+		return fmt.Errorf("snapshot config before env overrides: %w", err)
+	}
+
+	if missing := substituteEnvRefs(cfg); len(missing) > 0 {
+		logger.WarnCF(
+			"config",
+			"Config references unset environment variable(s); left as written",
+			map[string]any{"variables": missing},
+		)
+	}
+
+	gatewayHostBeforeEnv := cfg.Gateway.Host
+	if err = env.Parse(cfg); err != nil {
+		return err
+	}
+	applySkillsRegistryEnvCompat(cfg)
+	if err = applyChannelEnvOverrides(cfg.Channels); err != nil {
+		return err
+	}
+	cfg.Gateway.Host, err = resolveGatewayHostFromEnv(gatewayHostBeforeEnv)
+	if err != nil {
+		return fmt.Errorf("invalid gateway host: %w", err)
+	}
+
+	if err = finishOverlay(cfg, base); err != nil {
+		return fmt.Errorf("snapshot config after env overrides: %w", err)
+	}
+	return nil
 }
 
 func applySkillsRegistryEnvCompat(cfg *Config) {
@@ -2194,32 +2239,55 @@ func SaveConfig(path string, cfg *Config) error {
 	if cfg.Version < CurrentVersion {
 		cfg.Version = CurrentVersion
 	}
-	// Filter out virtual models and the fallbacks generated for them before
-	// serializing to config file
-	nonVirtualModels := make([]*ModelConfig, 0, len(cfg.ModelList))
-	for _, m := range cfg.ModelList {
-		if !m.isVirtual {
-			nonVirtualModels = append(nonVirtualModels, m.forPersistence())
-		}
-	}
-	// Temporarily replace ModelList with filtered version for serialization
-	originalModelList := cfg.ModelList
-	defer func() {
-		// Restore original ModelList after serialization
-		cfg.ModelList = originalModelList
-	}()
-	cfg.ModelList = nonVirtualModels
-
-	if err := saveSecurityConfig(securityPath(path), cfg); err != nil {
-		logger.ErrorCF("config", "cannot save .security.yml", map[string]any{"error": err})
-		return err
-	}
-
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	jsonData, yamlData, err := serializeConfig(cfg)
 	if err != nil {
 		return err
 	}
-	return fileutil.WriteFileAtomic(path, data, 0o600)
+	// Put back the file values of anything env overrides or ${VAR}
+	// substitution produced at load time, unless the caller changed it.
+	if !cfg.overlay.empty() {
+		if yamlData, err = restoreSecurityYAML(yamlData, cfg.overlay.yaml); err != nil {
+			return fmt.Errorf("restore .security.yml values: %w", err)
+		}
+		if jsonData, err = restoreConfigJSON(jsonData, cfg.overlay.json); err != nil {
+			return fmt.Errorf("restore config.json values: %w", err)
+		}
+	}
+
+	if err := fileutil.WriteFileAtomic(securityPath(path), yamlData, 0o600); err != nil {
+		logger.ErrorCF("config", "cannot save .security.yml", map[string]any{"error": err})
+		return err
+	}
+	return fileutil.WriteFileAtomic(path, jsonData, 0o600)
+}
+
+// serializeConfig renders cfg as SaveConfig writes it: config.json and
+// .security.yml contents, without virtual (multi-key expansion) models.
+func serializeConfig(cfg *Config) (jsonData, yamlData []byte, err error) {
+	defer withoutVirtualModels(cfg)()
+
+	if yamlData, err = marshalSecurityYAML(cfg); err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal security config: %w", err)
+	}
+	if jsonData, err = marshalConfigJSON(cfg); err != nil {
+		return nil, nil, err
+	}
+	return jsonData, yamlData, nil
+}
+
+// withoutVirtualModels temporarily replaces cfg.ModelList with its persisted
+// form (no virtual models from multi-key expansion) and returns a function
+// that puts the original list back.
+func withoutVirtualModels(cfg *Config) func() {
+	persisted := make([]*ModelConfig, 0, len(cfg.ModelList))
+	for _, m := range cfg.ModelList {
+		if m != nil && !m.isVirtual {
+			persisted = append(persisted, m.forPersistence())
+		}
+	}
+	original := cfg.ModelList
+	cfg.ModelList = persisted
+	return func() { cfg.ModelList = original }
 }
 
 func (c *Config) WorkspacePath() string {
