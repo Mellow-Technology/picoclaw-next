@@ -7,7 +7,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: docker.io/sipeed/picoclaw:latest
+    image: ghcr.io/mellow-technology/picoclaw-next:latest
     container_name: picoclaw-agent
     profiles:
       - agent
@@ -15,7 +15,7 @@ services:
     #extra_hosts:
     #  - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/root/.picoclaw
+      - ./data:/home/picoclaw/.picoclaw
     entrypoint: ["picoclaw", "agent"]
     stdin_open: true
     tty: true
@@ -28,7 +28,7 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile
-    image: docker.io/sipeed/picoclaw:latest
+    image: ghcr.io/mellow-technology/picoclaw-next:latest
     container_name: picoclaw-gateway
     restart: unless-stopped
     profiles:
@@ -37,7 +37,7 @@ services:
     #extra_hosts:
     #  - "host.docker.internal:host-gateway"
     volumes:
-      - ./data:/root/.picoclaw
+      - ./data:/home/picoclaw/.picoclaw
 
   # ─────────────────────────────────────────────
   # PicoClaw Launcher (Web Console + Gateway)
