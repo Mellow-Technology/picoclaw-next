@@ -87,6 +87,9 @@ func (h *Handler) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preserveMCPConfigRedactions(&cfg, existingCfg)
+	// The client edited the effective config (env overrides and ${VAR}
+	// substitution applied); keep those runtime values out of the saved files.
+	cfg.CarryRuntimeOverrides(existingCfg)
 
 	// Load existing config and copy security credentials before validation,
 	// so that security-managed fields (e.g. pico token) are available.
@@ -206,6 +209,10 @@ func (h *Handler) handlePatchConfig(w http.ResponseWriter, r *http.Request) {
 	newCfg.Session.ApplyDmScope()
 	newCfg.Session.DeriveDmScope()
 	preserveMCPConfigRedactions(&newCfg, cfg)
+	// The patch was merged into the effective config (env overrides and
+	// ${VAR} substitution applied); keep those runtime values out of the
+	// saved files.
+	newCfg.CarryRuntimeOverrides(cfg)
 
 	// Restore security fields (tokens/keys) from the loaded config before validation,
 	// because private fields are lost during JSON round-trip.

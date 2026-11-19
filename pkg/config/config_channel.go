@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -725,7 +726,18 @@ func isValidChannelType(channelType string) bool {
 //
 // After calling this method, callers can safely use b.extend via Decode()
 // without re-parsing raw Settings.
+// InitChannelList validates and decodes every channel's settings, then
+// applies channel environment overrides (see applyChannelEnvOverrides).
 func InitChannelList(channels ChannelsConfig) error {
+	if err := initChannelListFromFiles(channels); err != nil {
+		return err
+	}
+	return applyChannelEnvOverrides(channels)
+}
+
+// initChannelListFromFiles is InitChannelList without environment overrides.
+// LoadConfig applies those separately so it can keep them out of saved files.
+func initChannelListFromFiles(channels ChannelsConfig) error {
 	// Step 1 & 3: validate type and decode into typed settings
 	for name, bc := range channels {
 		if bc == nil {
@@ -746,11 +758,6 @@ func InitChannelList(channels ChannelsConfig) error {
 			if err := bc.Decode(target); err != nil {
 				return fmt.Errorf("channel %q failed to decode settings: %w", name, err)
 			}
-			// Apply env overrides for channel-specific fields via struct tags
-			if err := env.Parse(target); err != nil {
-				// Non-fatal: some env vars may not apply
-			}
-			applyTelegramStreamingEnvCompat(target)
 			if err := validateChannelStreamingConfig(name, target); err != nil {
 				return err
 			}
@@ -765,23 +772,115 @@ func InitChannelList(channels ChannelsConfig) error {
 	return nil
 }
 
-func applyTelegramStreamingEnvCompat(target any) {
+// Channel environment overrides, applied after the config files are loaded:
+//
+//   - By type, for every channel of that type: the env tags on the settings
+//     structs (e.g. PICOCLAW_CHANNELS_TELEGRAM_TOKEN), plus
+//     PICOCLAW_CHANNELS_<TYPE>_ENABLED.
+//   - By name, for one channel_list entry, taking precedence over the type
+//     variables: PICOCLAW_CHANNEL_<NAME>_<SUFFIX>, where <SUFFIX> is anything
+//     after PICOCLAW_CHANNELS_<TYPE>_ (e.g. PICOCLAW_CHANNEL_SUPPORT_BOT_TOKEN
+//     for a telegram channel named "support_bot"), plus
+//     PICOCLAW_CHANNEL_<NAME>_ENABLED.
+//
+// <TYPE> and <NAME> are upper-cased, with characters other than letters and
+// digits replaced by "_". Overrides only apply to channels in channel_list.
+const (
+	envChannelTypePrefix = "PICOCLAW_CHANNELS_"
+	envChannelNamePrefix = "PICOCLAW_CHANNEL_"
+)
+
+func envSegment(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r - 'a' + 'A'
+		case (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			return r
+		}
+		return '_'
+	}, s)
+}
+
+func applyChannelEnvOverrides(channels ChannelsConfig) error {
+	names := make([]string, 0, len(channels))
+	for name := range channels {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	environ := os.Environ()
+	for _, name := range names {
+		bc := channels[name]
+		if bc == nil {
+			continue
+		}
+		typePrefix := envChannelTypePrefix + envSegment(bc.Type) + "_"
+		namePrefix := envChannelNamePrefix + envSegment(name) + "_"
+
+		// Per-name variables, translated to their per-type spelling.
+		byName := map[string]string{}
+		for _, kv := range environ {
+			key, value, ok := strings.Cut(kv, "=")
+			if ok && strings.HasPrefix(key, namePrefix) {
+				byName[typePrefix+strings.TrimPrefix(key, namePrefix)] = value
+			}
+		}
+
+		for _, lookup := range []func(string) (string, bool){
+			os.LookupEnv,
+			func(k string) (string, bool) { v, ok := byName[k]; return v, ok },
+		} {
+			if raw, ok := lookup(typePrefix + "ENABLED"); ok {
+				value, err := strconv.ParseBool(strings.TrimSpace(raw))
+				if err != nil {
+					return fmt.Errorf("channel %q: invalid boolean %q for %sENABLED", name, raw, typePrefix)
+				}
+				bc.Enabled = value
+			}
+		}
+
+		target, err := bc.GetDecoded()
+		if err != nil {
+			return err
+		}
+		if target == nil {
+			continue
+		}
+		// Non-fatal, as before: some env vars may not apply.
+		_ = env.Parse(target)
+		applyTelegramStreamingEnvCompat(target, os.LookupEnv)
+		if len(byName) > 0 {
+			_ = env.ParseWithOptions(target, env.Options{Environment: byName})
+			applyTelegramStreamingEnvCompat(target, func(k string) (string, bool) {
+				v, ok := byName[k]
+				return v, ok
+			})
+		}
+		if err := validateChannelStreamingConfig(name, target); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func applyTelegramStreamingEnvCompat(target any, lookupEnv func(string) (string, bool)) {
 	settings, ok := target.(*TelegramSettings)
 	if !ok || settings == nil {
 		return
 	}
 
-	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED"); ok {
+	if raw, ok := lookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_ENABLED"); ok {
 		if value, err := strconv.ParseBool(raw); err == nil {
 			settings.Streaming.Enabled = value
 		}
 	}
-	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS"); ok {
+	if raw, ok := lookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_THROTTLE_SECONDS"); ok {
 		if value, err := strconv.Atoi(raw); err == nil {
 			settings.Streaming.ThrottleSeconds = value
 		}
 	}
-	if raw, ok := os.LookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS"); ok {
+	if raw, ok := lookupEnv("PICOCLAW_CHANNELS_TELEGRAM_STREAMING_MIN_GROWTH_CHARS"); ok {
 		if value, err := strconv.Atoi(raw); err == nil {
 			settings.Streaming.MinGrowthChars = value
 		}

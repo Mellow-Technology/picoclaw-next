@@ -249,13 +249,21 @@ func (s *SecureString) UnmarshalJSON(value []byte) error {
 	return s.fromRaw(v)
 }
 
+// isSecretReference reports whether v is persisted as written instead of as
+// its resolved value: an enc:// or file:// reference, or a ${VAR} reference.
+func isSecretReference(v string) bool {
+	return strings.HasPrefix(v, credential.EncScheme) ||
+		strings.HasPrefix(v, credential.FileScheme) ||
+		hasEnvRef(v)
+}
+
 func (s SecureString) MarshalYAML() (any, error) {
-	// Preserve raw value if it is already a reference (enc:// or file://)
-	if strings.HasPrefix(s.raw, credential.EncScheme) || strings.HasPrefix(s.raw, credential.FileScheme) {
+	// Preserve raw value if it is already a reference (enc://, file:// or ${VAR})
+	if isSecretReference(s.raw) {
 		return s.raw, nil
 	}
 	// If resolved is a reference format (e.g. set via Set), copy back to raw
-	if strings.HasPrefix(s.resolved, credential.EncScheme) || strings.HasPrefix(s.resolved, credential.FileScheme) {
+	if isSecretReference(s.resolved) {
 		s.raw = s.resolved
 		return s.raw, nil
 	}
@@ -279,7 +287,14 @@ func (s *SecureString) UnmarshalYAML(value *yaml.Node) error {
 
 func (s *SecureString) fromRaw(v string) error {
 	s.raw = v
-	vv, err := resolveKey(v)
+	// ${VAR} references resolve from the environment; the reference itself
+	// stays in raw, so it is what gets persisted.
+	expanded, missing := expandEnvRefs(v)
+	if len(missing) > 0 {
+		logger.WarnCF("config", "Secret references unset environment variable(s); left as written",
+			map[string]any{"variables": missing})
+	}
+	vv, err := resolveKey(expanded)
 	if err != nil {
 		return err
 	}
@@ -335,7 +350,9 @@ func (v *SecureModelList) UnmarshalYAML(value *yaml.Node) error {
 		if sec == nil {
 			sec = mm[m.ModelName]
 		}
-		if sec != nil {
+		// Keys set in config.json (e.g. "${OPENAI_API_KEY}") are kept unless
+		// .security.yml provides some for this model.
+		if sec != nil && len(sec.APIKeys) > 0 {
 			m.APIKeys = sec.APIKeys
 		}
 	}
