@@ -12,26 +12,27 @@ import (
 	"golang.org/x/term"
 )
 
+// decodeJSONWithDiagnostics decodes data into target, turning syntax and type
+// errors into diagnostics with line, column and a source preview. Unknown
+// fields are not an error here; see unknownJSONFields.
 func decodeJSONWithDiagnostics(data []byte, target any, label string) error {
-	var raw any
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return wrapJSONError(data, err, label)
-	}
-
-	unknownFields := collectUnknownJSONFields(raw, reflect.TypeOf(target), "")
-	if len(unknownFields) > 0 {
-		sort.Strings(unknownFields)
-		return fmt.Errorf(
-			"%s contains unknown field(s): %s",
-			label,
-			strings.Join(unknownFields, ", "),
-		)
-	}
-
 	if err := json.Unmarshal(data, target); err != nil {
 		return wrapJSONError(data, err, label)
 	}
 	return nil
+}
+
+// unknownJSONFields returns the sorted JSON paths in data (e.g.
+// "tools.web.fatch_limit_bytes") that have no matching field in target's
+// type. It returns nil for malformed JSON; decoding reports that separately.
+func unknownJSONFields(data []byte, target any) []string {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	fields := collectUnknownJSONFields(raw, reflect.TypeOf(target), "")
+	sort.Strings(fields)
+	return fields
 }
 
 func DiagnosticSummary(err error) string {
